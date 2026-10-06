@@ -165,7 +165,7 @@ create_gitignore() {
         err ".gitignore уже существует, ничего не изменено."
         return 1
     fi
-    printf '%s\n' '*.exe' '*.o' '*.out' '.vscode/' 'tools/' '.clang-format' 'clang-format' 'lab-clang-format' > .gitignore
+    printf '%s\n' '*.exe' '*.o' '*.out' '.vscode/' '.github/' 'tools/' '.clang-format' 'clang-format' 'lab-clang-format' > .gitignore
     ok "Создан .gitignore"
 }
 
