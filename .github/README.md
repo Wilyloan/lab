@@ -7,8 +7,8 @@
 ## Установка
 
 ```bash
-git clone <адрес-репозитория>
-cd <папка-репозитория>
+git clone https://github.com/Wilyloan/lab.git
+cd lab
 ./install.sh
 ```
 
