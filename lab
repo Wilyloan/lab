@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+# lab — консольное меню для работы с лабораторными.
+# Работает в текущей папке, прав root не требует.
+
+set -u
+
+# Флаги компиляции (чтобы изменить — правьте эту строку)
+CFLAGS=(-std=c99 -Wall -Wextra -Werror)
+
+# ---------- оформление ----------
+
+if [[ -t 1 && -z ${NO_COLOR-} ]]; then
+    C_BOLD=$'\e[1m' C_DIM=$'\e[2m' C_CYAN=$'\e[36m' C_GREEN=$'\e[32m'
+    C_RED=$'\e[31m' C_YELLOW=$'\e[33m' C_RESET=$'\e[0m'
+else
+    C_BOLD= C_DIM= C_CYAN= C_GREEN= C_RED= C_YELLOW= C_RESET=
+fi
+
+RULE="──────────────────────────────────────────────"
+
+# box_top ЗАГОЛОВОК — верх рамки с заголовком
+box_top() {
+    printf "\n%s┌─%s %s %s%s%s\n" "$C_CYAN" "$C_BOLD" "$1" "$C_RESET$C_CYAN" \
+        "${RULE:0:$((${#1} < 44 ? 44 - ${#1} : 0))}" "$C_RESET"
+}
+# box_row ТЕКСТ — строка внутри рамки
+box_row() { printf "%s│%s  %s\n" "$C_CYAN" "$C_RESET" "$1"; }
+box_sep() { printf "%s├%s%s\n" "$C_CYAN" "$RULE" "$C_RESET"; }
+box_bottom() { printf "%s└%s%s\n" "$C_CYAN" "$RULE" "$C_RESET"; }
+
+ok() { printf "%s✔%s %s\n" "$C_GREEN" "$C_RESET" "$1"; }
+err() { printf "%s✘%s %s\n" "$C_RED" "$C_RESET" "$1" >&2; }
+
+# ---------- ввод ----------
+
+STEP=0 STEPS=0
+
+# ask ПЕРЕМЕННАЯ "Вопрос" [по_умолчанию] — запрашивает неотрицательное число
+ask() {
+    local -n ref=$1
+    local prompt=$2 default=${3-} input hint=""
+    ((STEP++))
+    [[ -n $default ]] && hint=" ${C_DIM}[по умолчанию $default]${C_RESET}"
+    while true; do
+        read -rp "${C_CYAN}[$STEP/$STEPS]${C_RESET} $prompt$hint ${C_BOLD}›${C_RESET} " input || exit 0
+        input=${input:-$default}
+        if [[ $input =~ ^[0-9]+$ ]]; then
+            ref=$((10#$input))
+            return
+        fi
+        err "Нужно ввести неотрицательное число, попробуйте снова."
+    done
+}
+
+# count_tests ПАПКА ТИП — число тестов pos|neg
+count_tests() {
+    local n=0 f
+    for f in "$1"/func_tests/data/"$2"_*_in.txt; do
+        [[ -e $f ]] && ((n++))
+    done
+    echo "$n"
+}
+
+# choose_lab ЗАГОЛОВОК — выбор папки lab_* из текущей директории, результат в $LAB
+choose_lab() {
+    local labs=() d i n
+    for d in lab_*/; do
+        [[ -d $d ]] && labs+=("${d%/}")
+    done
+    if ((${#labs[@]} == 0)); then
+        err "В текущей папке нет лабораторных (lab_*)."
+        return 1
+    fi
+    box_top "$1"
+    for i in "${!labs[@]}"; do
+        box_row "$(printf "%s%2d%s  %s  %s(+%d / −%d)%s" "$C_GREEN$C_BOLD" "$((i + 1))" "$C_RESET" \
+            "${labs[i]}" "$C_DIM" "$(count_tests "${labs[i]}" pos)" "$(count_tests "${labs[i]}" neg)" "$C_RESET")"
+    done
+    box_row "$(printf "%s 0%s  отмена" "$C_GREEN$C_BOLD" "$C_RESET")"
+    box_bottom
+    while true; do
+        read -rp "${C_BOLD}Выберите лабораторную ›${C_RESET} " n || return 1
+        [[ $n == 0 ]] && return 1
+        if [[ $n =~ ^[0-9]+$ ]] && ((n >= 1 && n <= ${#labs[@]})); then
+            LAB=${labs[n - 1]}
+            return 0
+        fi
+        err "Неверный номер."
+    done
+}
+
+# ---------- действия ----------
+
+create_lab() {
+    local lab task variant pos neg pos_args neg_args name data i n confirm has_variant
+    box_top "Новая лабораторная"
+    box_row "${C_DIM}Enter — принять значение по умолчанию${C_RESET}"
+    box_bottom
+    read -rp "Задача с вариантами? ${C_DIM}[Y/n]${C_RESET} ${C_BOLD}›${C_RESET} " has_variant || exit 0
+    STEP=0 STEPS=7
+    [[ $has_variant == [nNнН]* ]] && STEPS=6
+    ask lab "Номер лабораторной работы"
+    ask task "Номер задания"
+    [[ $has_variant == [nNнН]* ]] || ask variant "Номер варианта"
+    ask pos "Позитивных тестов" 3
+    ask neg "Негативных тестов" 3
+    ask pos_args "Файлов с аргументами для позитивных" 0
+    ask neg_args "Файлов с аргументами для негативных" 0
+    ((pos_args > pos)) && pos_args=$pos
+    ((neg_args > neg)) && neg_args=$neg
+
+    if [[ $has_variant == [nNнН]* ]]; then
+        name=$(printf "lab_%02d_%02d" "$lab" "$task")
+    else
+        name=$(printf "lab_%02d_%02d_%02d" "$lab" "$task" "$variant")
+    fi
+    if [[ -e $name ]]; then
+        err "'$name' уже существует"
+        return 1
+    fi
+
+    box_top "Будет создано"
+    box_row "${C_BOLD}$name/${C_RESET}"
+    box_row "├── main.c"
+    box_row "└── func_tests/"
+    box_row "    ├── README.md"
+    box_row "    └── data/"
+    box_row "        ${C_GREEN}+${C_RESET} позитивных тестов: $pos ${C_DIM}(args: $pos_args)${C_RESET}"
+    box_row "        ${C_RED}−${C_RESET} негативных тестов: $neg ${C_DIM}(args: $neg_args)${C_RESET}"
+    box_bottom
+    read -rp "${C_BOLD}Создать? [Y/n] ›${C_RESET} " confirm || exit 0
+    if [[ $confirm == [nNнН]* ]]; then
+        echo "Отменено."
+        return 0
+    fi
+
+    data="$name/func_tests/data"
+    mkdir -p "$data"
+    cat > "$name/main.c" <<'EOF'
+#include <stdio.h>
+
+int main(void)
+{
+    return 0;
+}
+EOF
+    : > "$name/func_tests/README.md"
+    for ((i = 1; i <= pos; i++)); do
+        n=$(printf "%02d" "$i")
+        : > "$data/pos_${n}_in.txt"
+        : > "$data/pos_${n}_out.txt"
+        ((i <= pos_args)) && : > "$data/pos_${n}_args.txt"
+    done
+    for ((i = 1; i <= neg; i++)); do
+        n=$(printf "%02d" "$i")
+        : > "$data/neg_${n}_in.txt"
+        : > "$data/neg_${n}_out.txt"
+        ((i <= neg_args)) && : > "$data/neg_${n}_args.txt"
+    done
+    ok "Создано: ${C_BOLD}$name${C_RESET}"
+}
+
+create_gitignore() {
+    if [[ -e .gitignore ]]; then
+        err ".gitignore уже существует, ничего не изменено."
+        return 1
+    fi
+    printf '%s\n' '*.exe' '*.o' '*.out' '.vscode/' 'tools/' '.clang-format' 'clang-format' 'lab-clang-format' > .gitignore
+    ok "Создан .gitignore"
+}
+
+# read_args ФАЙЛ — заполняет массив ARGS аргументами из файла.
+# Аргументы разделяются пробелами и переводами строк; "..." и '...' объединяют
+# слова с пробелами в один аргумент. Пустой или отсутствующий файл = без аргументов.
+read_args() {
+    ARGS=()
+    [[ -f $1 ]] || return 0
+    local text c cur="" in_tok=0 quote="" i
+    text=$(<"$1")
+    for ((i = 0; i < ${#text}; i++)); do
+        c=${text:i:1}
+        if [[ -n $quote ]]; then
+            if [[ $c == "$quote" ]]; then
+                quote=""
+            else
+                cur+=$c
+            fi
+        elif [[ $c == '"' || $c == "'" ]]; then
+            quote=$c in_tok=1
+        elif [[ $c == [[:space:]] ]]; then
+            if ((in_tok)); then
+                ARGS+=("$cur") cur="" in_tok=0
+            fi
+        else
+            cur+=$c in_tok=1
+        fi
+    done
+    if ((in_tok)); then
+        ARGS+=("$cur")
+    fi
+}
+
+list_labs() {
+    local d found=0
+    box_top "Лабораторные"
+    for d in lab_*/; do
+        [[ -d $d ]] || continue
+        found=1
+        box_row "$(printf "%s  %s(+%d / −%d)%s" "${d%/}" "$C_DIM" \
+            "$(count_tests "${d%/}" pos)" "$(count_tests "${d%/}" neg)" "$C_RESET")"
+    done
+    ((found)) || box_row "В текущей папке нет лабораторных (lab_*)."
+    box_bottom
+}
+
+# build_lab_exe — собирает $LAB/app.exe с флагами $CFLAGS
+build_lab_exe() {
+    if [[ ! -f $LAB/main.c ]]; then
+        err "Нет файла $LAB/main.c"
+        return 1
+    fi
+    gcc "${CFLAGS[@]}" -o "$LAB/app.exe" "$LAB"/*.c -lm || {
+        err "Ошибка сборки."
+        return 1
+    }
+}
+
+build_lab() {
+    choose_lab "Сборка" || return 1
+    build_lab_exe && ok "Собрано: ${C_BOLD}$LAB/app.exe${C_RESET}"
+}
+
+# Для каждого *_in.txt программа запускается с аргументами из *_args.txt
+# (нет файла или он пуст — без аргументов), а её вывод записывается в *_out.txt.
+# Позитивный тест пройден, если код возврата 0.
+# Негативный тест пройден, если код возврата ненулевой.
+# Коды падения по сигналу (SIGILL 132, SIGABRT 134, SIGBUS 135, SIGFPE 136, SIGSEGV 139) —
+# провал в любом случае. Код 124 — программа не уложилась в 5 секунд (нужна команда timeout).
+# Остальные ненулевые коды, в том числе return -1, -2 (255, 254), обычные.
+run_tests() {
+    choose_lab "Функциональные тесты" || return 1
+    build_lab_exe || return 1
+
+    local data="$LAB/func_tests/data" kind in out name pass=0 fail=0 code ok_run note total bar width=24 filled i
+    local written limit=5 runner=()
+    command -v timeout > /dev/null && runner=(timeout "$limit")
+
+    box_top "Тесты: $LAB"
+    for kind in pos neg; do
+        for in in "$data"/${kind}_*_in.txt; do
+            [[ -e $in ]] || continue
+            out=${in%_in.txt}_out.txt
+            name=${in##*/}; name=${name%_in.txt}
+            read_args "${in%_in.txt}_args.txt"
+            { ${runner[@]+"${runner[@]}"} "$LAB/app.exe" ${ARGS[@]+"${ARGS[@]}"} < "$in" > "$out" 2>/dev/null; } 2>/dev/null
+            code=$?
+            written="вывод записан"
+            [[ -s $out ]] || written="вывод пуст"
+
+            ok_run=0 note="код $code"
+            if ((code == 124)); then
+                note="превышено время ${limit} с (бесконечный цикл?)"
+            elif [[ $code == 132 || $code == 134 || $code == 135 || $code == 136 || $code == 139 ]]; then
+                note="код $code — программа аварийно завершилась"
+            elif [[ $kind == pos ]]; then
+                ((code == 0)) && ok_run=1 || note="код $code, ожидался 0"
+            else
+                ((code != 0)) && ok_run=1 || note="код 0, ожидался ненулевой"
+            fi
+
+            if ((ok_run)); then
+                box_row "${C_GREEN}✔ PASS${C_RESET}  $name ${C_DIM}($note, $written)${C_RESET}"; ((pass++))
+            else
+                box_row "${C_RED}✘ FAIL${C_RESET}  $name ${C_DIM}($note)${C_RESET}"; ((fail++))
+            fi
+        done
+    done
+
+    total=$((pass + fail))
+    box_sep
+    if ((total == 0)); then
+        box_row "${C_YELLOW}Тестов нет${C_RESET}"
+    else
+        filled=$((pass * width / total))
+        bar=""
+        for ((i = 0; i < width; i++)); do
+            ((i < filled)) && bar+="█" || bar+="░"
+        done
+        if ((fail == 0)); then
+            box_row "${C_GREEN}$bar${C_RESET}  ${C_GREEN}$pass/$total — все тесты пройдены${C_RESET}"
+        else
+            box_row "${C_RED}$bar${C_RESET}  ${C_RED}$pass/$total — провалено: $fail${C_RESET}"
+        fi
+    fi
+    box_bottom
+}
+
+# ---------- стиль кода ----------
+
+# Конфигурация clang-format по правилам code_style.pdf
+write_clang_format() {
+    cat > "$1" <<'CFG'
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+ContinuationIndentWidth: 4
+UseTab: Never
+ColumnLimit: 80
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeElse: true
+  BeforeWhile: true
+  SplitEmptyFunction: true
+IndentCaseLabels: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInCStyleCastParentheses: false
+SpaceAfterCStyleCast: false
+PointerAlignment: Right
+BreakBeforeBinaryOperators: None
+AlignAfterOpenBracket: Align
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Always
+SortIncludes: false
+CFG
+}
+
+# find_clang_format — ищет clang-format, результат в $CLANG_FORMAT.
+# Порядок: tools/ рядом со скриптом, установленный lab-clang-format,
+# расширение VS Code, затем clang-format из системы (PATH).
+find_clang_format() {
+    local f dir=.
+    [[ $0 == */* ]] && dir=${0%/*}
+    for f in "$dir"/tools/clang-format \
+             "$dir"/lab-clang-format \
+             "$HOME"/.vscode/extensions/ms-vscode.cpptools-*/LLVM/bin/clang-format \
+             "$HOME"/.vscode-server/extensions/ms-vscode.cpptools-*/LLVM/bin/clang-format; do
+        if [[ -x $f ]]; then
+            CLANG_FORMAT=$f
+            return 0
+        fi
+    done
+    CLANG_FORMAT=$(command -v clang-format) && return 0
+    CLANG_FORMAT=""
+    return 1
+}
+
+format_lab() {
+    choose_lab "Форматирование кода" || return 1
+    if ! find_clang_format; then
+        err "clang-format не найден."
+        echo "  Положите бинарник clang-format в папку tools/ рядом со скриптом lab." >&2
+        return 1
+    fi
+    [[ -e .clang-format ]] || { write_clang_format .clang-format; ok "создан .clang-format"; }
+
+    local f n=0
+    box_top "Форматирование: $LAB"
+    for f in "$LAB"/*.c "$LAB"/*.h; do
+        [[ -f $f ]] || continue
+        if "$CLANG_FORMAT" -i -style=file "$f"; then
+            box_row "${C_GREEN}✔${C_RESET} ${f##*/}"; ((n++))
+        else
+            box_row "${C_RED}✘${C_RESET} ${f##*/}"
+        fi
+    done
+    ((n)) || box_row "${C_YELLOW}нет файлов .c / .h${C_RESET}"
+    box_sep
+    box_row "${C_DIM}Исправлены отступы, пробелы, скобки, переносы.${C_RESET}"
+    box_row "${C_DIM}Имена, doxygen, объявления переменных — вручную.${C_RESET}"
+    box_bottom
+}
+
+# ---------- главное меню ----------
+
+# item НОМЕР ТЕКСТ
+item() { box_row "$(printf "%s%s%s  %s" "$C_GREEN$C_BOLD" "$1" "$C_RESET" "$2")"; }
+
+show_menu() {
+    box_top "lab"
+    box_row "${C_DIM}$PWD${C_RESET}"
+    box_sep
+    item 1 "Создать шаблон лабораторной"
+    item 2 "Список лабораторных в текущей папке"
+    item 3 "Собрать лабораторную (gcc)"
+    item 4 "Запустить функциональные тесты"
+    item 5 "Создать .gitignore в текущей папке"
+    item 6 "Отформатировать код лабораторной"
+    item 0 "Выход"
+    box_bottom
+}
+
+while true; do
+    show_menu
+    read -rp "${C_BOLD}Выберите пункт ›${C_RESET} " choice || exit 0
+    case $choice in
+        1) create_lab ;;
+        2) list_labs ;;
+        3) build_lab ;;
+        4) run_tests ;;
+        5) create_gitignore ;;
+        6) format_lab ;;
+        0|q) exit 0 ;;
+        *) err "Неизвестный пункт." ;;
+    esac
+    read -rp "${C_DIM}Нажмите Enter, чтобы вернуться в меню…${C_RESET}" _ || exit 0
+done
